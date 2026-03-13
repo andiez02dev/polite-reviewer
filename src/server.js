@@ -65,40 +65,12 @@ app.post("/webhook", async (req, res) => {
 
   logStructured("webhook.received", { event, id });
 
-  if (event === "pull_request") {
-    const action = payload.action;
-    if (!["opened", "synchronize", "reopened"].includes(action)) {
-      return res.status(200).json({ skipped: true, reason: "irrelevant pull_request action" });
-    }
-
-    try {
-      const installationId = await getInstallationIdFromPayload(payload);
-
-      await queue.add("review-pr", {
-        installationId,
-        repository: {
-          owner: payload.repository.owner.login,
-          name: payload.repository.name,
-        },
-        pullRequestNumber: payload.pull_request.number,
-      });
-
-      logStructured("webhook.pull_request.enqueued", {
-        installationId,
-        repo: `${payload.repository.owner.login}/${payload.repository.name}`,
-        pullRequestNumber: payload.pull_request.number,
-      });
-
-      return res.status(202).json({ queued: true });
-    } catch (err) {
-      logStructured("webhook.pull_request.error", { error: String(err) });
-      return res.status(500).json({ error: "internal_error" });
-    }
-  }
-
   if (event === "issue_comment" && payload.action === "created") {
-    const commentBody = payload.comment?.body || "";
-    const isCommand = commentBody.trim().toLowerCase().startsWith("/polite-review");
+    const commentBody = (payload.comment?.body || "").trim().toLowerCase();
+    const isCommand =
+      commentBody === "/polite-review" ||
+      commentBody === "polite-review" ||
+      commentBody.startsWith("/polite-review ");
 
     if (!isCommand || !payload.issue?.pull_request) {
       return res.status(200).json({ skipped: true, reason: "not a polite-review command" });
