@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: polite-ai-redis
+    ports:
+      - "6379:6379"
+
+  server:
+    build: .
+    container_name: polite-ai-server
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./keys:/app/keys:ro
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: polite-ai-worker
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./keys:/app/keys:ro
+    command: ["node", "src/worker.js"]
+    restart: unless-stopped
+
