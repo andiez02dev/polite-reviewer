@@ -44,14 +44,17 @@ cp .env.example .env
 Required variables:
 
 - **`PORT`**: Port for the Express server (default `3000`).
-- **`OPENAI_API_KEY`**: Your Gemini API key.
-- **`OPENAI_MODEL`**: Gemini model to use (e.g. `gemini-2.0-pro`).
 - **`GITHUB_APP_ID`**: Your GitHub App ID.
 - **`GITHUB_INSTALLATION_ID`** (optional): Default installation id if not provided in payloads.
-- **`GITHUB_PRIVATE_KEY_PATH`**: Path to the GitHub App private key PEM (default `./keys/github-private-key.pem`).
+- **`GITHUB_PRIVATE_KEY`** or **`GITHUB_PRIVATE_KEY_PATH`**:
+  - `GITHUB_PRIVATE_KEY` (recommended for cloud providers like Railway): the full PEM content as an env var (use `\n` for newlines if required by the platform).
+  - `GITHUB_PRIVATE_KEY_PATH` (for local dev): path to the GitHub App private key PEM (default `./keys/github-private-key.pem`).
 - **`WEBHOOK_SECRET`**: Shared secret for webhook signatures.
-- **`REDIS_HOST`**: Redis host (default `127.0.0.1`).
-- **`REDIS_PORT`**: Redis port (default `6379`).
+- **Redis**:
+  - Local dev: `REDIS_HOST` (default `127.0.0.1`), `REDIS_PORT` (default `6379`).
+  - Managed Redis (e.g. Railway): `REDIS_URL` such as `redis://default:password@host:6379`.
+- **`GEMINI_API_KEY`**: Your Gemini API key.
+- **`GEMINI_MODEL`**: Gemini model to use (e.g. `gemini-2.5-flash`).
 
 3. **Add GitHub private key**
 
