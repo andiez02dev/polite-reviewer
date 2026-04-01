@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config, logStructured } from "./config.js";
 import { buildReviewPrompt } from "./ai/prompt-builder.js";
 import type {
-  ReviewableFile,
+  EnrichedFile,
   RepoContext,
   AIReviewResult,
   AIReviewComment,
@@ -11,7 +11,10 @@ import type {
 } from "./types.js";
 
 const genAI = new GoogleGenerativeAI(config.geminiApiKey);
-const model = genAI.getGenerativeModel({ model: config.geminiModel });
+const model = genAI.getGenerativeModel({ model: config.geminiModel, generationConfig: {
+  temperature: 0.2,
+  responseMimeType: "application/json",
+} });
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -102,7 +105,7 @@ function parseComments(raw: unknown): AIReviewComment[] {
 
 export async function reviewDiffFilesWithAI(params: {
   pr: { title: string; body: string | null };
-  files: ReviewableFile[];
+  files: EnrichedFile[];
   repoContext: RepoContext;
 }): Promise<AIReviewResult> {
   const { pr, files, repoContext } = params;
@@ -113,7 +116,23 @@ export async function reviewDiffFilesWithAI(params: {
 
   const { systemPrompt, userPrompt } = buildReviewPrompt({ pr, files, repoContext });
 
-  const result = await model.generateContent(`${systemPrompt}\n\n${userPrompt}`);
+  const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+
+  logStructured("ai.prompt.sending", {
+    model: config.geminiModel,
+    promptLength: fullPrompt.length,
+    fileCount: files.length,
+    files: files.map((f) => ({
+      filename: f.filename,
+      mode: f.logicalBlocks && f.logicalBlocks.length > 0 ? "ast" : "raw_patch",
+      blockCount: f.logicalBlocks?.length ?? 0,
+    })),
+  });
+
+  // Uncomment to see full prompt content (verbose, use only for debugging):
+  // console.log("=== FULL PROMPT ===\n", fullPrompt, "\n=== END PROMPT ===");
+
+  const result = await model.generateContent(fullPrompt);
 
   let raw = result.response.text().trim() || "{}";
 

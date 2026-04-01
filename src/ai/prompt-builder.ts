@@ -1,9 +1,9 @@
-import type { ReviewableFile, RepoContext } from "../types.js";
+import type { EnrichedFile, RepoContext } from "../types.js";
 import { annotatePatchWithNewLineNumbers } from "../analysis/diff-parser.js";
 
 export function buildReviewPrompt(params: {
   pr: { title: string; body: string | null };
-  files: ReviewableFile[];
+  files: EnrichedFile[];
   repoContext: RepoContext;
 }): { systemPrompt: string; userPrompt: string } {
   const { pr, files, repoContext } = params;
@@ -29,10 +29,19 @@ export function buildReviewPrompt(params: {
       : "";
 
   const filesSummary = files
-    .map(
-      (f) =>
-        `File: ${f.filename} (status: ${f.status}, +${f.additions} -${f.deletions})\nPatch (with new-file line numbers):\n${annotatePatchWithNewLineNumbers(f.patch)}`,
-    )
+    .map((f) => {
+      const header = `File: ${f.filename} (status: ${f.status}, +${f.additions} -${f.deletions})`;
+      if (f.logicalBlocks && f.logicalBlocks.length > 0) {
+        const blocks = f.logicalBlocks
+          .map(
+            (b) =>
+              `// File: ${f.filename} | Changed lines: ${b.coveredChangedLines.join(", ")} | Node: ${b.nodeKind}\n${b.text}`,
+          )
+          .join("\n\n---\n\n");
+        return `${header}\nLogical blocks (AST-extracted):\n${blocks}`;
+      }
+      return `${header}\nPatch (with new-file line numbers):\n${annotatePatchWithNewLineNumbers(f.patch)}`;
+    })
     .join("\n\n----------------\n\n");
 
   const systemPrompt =
@@ -73,7 +82,7 @@ Perform a deep code review focusing on:
 **Every comment MUST be actionable with:**
 1. Clear explanation of the problem
 2. Why it matters (impact)
-3. Concrete code fix suggestion in \`\`\`suggestion format
+3. Concrete code fix suggestion (provide the exact replacement code snippet directly in the "suggestion" field)
 4. Confidence level (high/medium/low)
 
 ## Severity definitions
@@ -127,9 +136,18 @@ Return ONLY this JSON structure:
 - "title": short (< 60 chars) title for the issue
 - "problem": detailed explanation of what's wrong
 - "impact": why this matters, what could go wrong
-- "suggestion": the EXACT code to replace (will be shown in GitHub suggestion block)
-- "suggestionStartLine": first line to replace (same as "line" if single line)
-- "suggestionEndLine": last line to replace (same as "line" if single line)
+- "suggestion": the EXACT replacement code for the line range [suggestionStartLine, suggestionEndLine]. This will be rendered as a GitHub suggestion block. The suggestion MUST contain ONLY the replacement lines — no surrounding context, no extra lines outside the range. Keep suggestion code concise: no inline comments, no explanatory text inside the code block (put explanations in "problem" and "impact" fields instead).
+- "suggestionStartLine": the FIRST line number of the code block being replaced. MUST match the actual start of the code you want to replace in the file.
+- "suggestionEndLine": the LAST line number of the code block being replaced. MUST match the actual end of the code you want to replace. If your suggestion adds lines after the original block, extend suggestionEndLine to cover all original lines that will be replaced. The number of lines in "suggestion" does NOT need to equal suggestionEndLine minus suggestionStartLine plus 1 — GitHub allows expanding or shrinking the block.
+
+## Critical rule for suggestions
+
+The GitHub suggestion block replaces EXACTLY the lines from suggestionStartLine to suggestionEndLine (inclusive) with the content of "suggestion". Therefore:
+- If you want to replace lines 10-12 with new code, set suggestionStartLine=10, suggestionEndLine=12
+- If you want to insert new lines after line 10 without removing anything, set suggestionStartLine=10, suggestionEndLine=10 and include line 10's original content at the top of "suggestion" followed by the new lines
+- NEVER set suggestionStartLine=suggestionEndLine=X when your suggestion replaces multiple lines starting at X — always set the correct end line
+- For multi-line expressions (ternary operators, object literals, function calls spanning multiple lines), the suggestionEndLine MUST be the line containing the closing token (semicolon, closing brace, closing paren) of that expression
+- When in doubt about the exact end line, set suggestionEndLine to be conservative (include more lines rather than fewer)
 
 ## If no issues found
 

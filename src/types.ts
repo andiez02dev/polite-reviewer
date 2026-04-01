@@ -64,3 +64,15 @@ export interface AIReviewResult {
   comments: AIReviewComment[];
   summary: AIReviewSummary;
 }
+
+export interface LogicalBlock {
+  text: string;
+  startLine: number;
+  endLine: number;
+  coveredChangedLines: number[];
+  nodeKind: string;
+}
+
+export interface EnrichedFile extends ReviewableFile {
+  logicalBlocks?: LogicalBlock[];
+}

@@ -5,8 +5,9 @@ import { reviewDiffFilesWithAI } from "./ai.js";
 import { buildReviewableFiles } from "./analysis/file-filter.js";
 import { deduplicateComments } from "./analysis/comment-deduplicator.js";
 import { clampToNearestAnchor, extractNewLineAnchorsFromPatch } from "./analysis/diff-parser.js";
+import { extractLogicalBlocks, isAstSupportedFile } from "./analysis/ast-extractor.js";
 import { config, logStructured } from "./config.js";
-import type { JobData, AIReviewComment, AIReviewSummary } from "./types.js";
+import type { JobData, AIReviewComment, AIReviewSummary, EnrichedFile } from "./types.js";
 import type { Octokit } from "@octokit/rest";
 
 type RedisConnection = string | { host: string; port: number };
@@ -114,6 +115,23 @@ async function loadRepoContext(
   }
 
   return context;
+}
+
+async function fetchFileContent(
+  octokit: Octokit,
+  { owner, repo, path, ref }: { owner: string; repo: string; path: string; ref: string },
+): Promise<string | null> {
+  try {
+    const res = await octokit.repos.getContent({ owner, repo, path, ref });
+    if ("content" in res.data && typeof res.data.content === "string" && res.data.content) {
+      const encoding = "encoding" in res.data ? (res.data.encoding as BufferEncoding) : "base64";
+      return Buffer.from(res.data.content, encoding).toString("utf8");
+    }
+    return null;
+  } catch (err) {
+    logStructured("astExtractor.fetch.error", { path, error: String(err) });
+    return null;
+  }
 }
 
 function formatCommentBody(comment: AIReviewComment): string {
@@ -253,9 +271,33 @@ const worker = new Worker<JobData>(
       repo: repository.name,
     });
 
+    // Enrich files with AST logical blocks where possible
+    const headSha = pr.data.head.sha;
+    const enrichedFiles: EnrichedFile[] = await Promise.all(
+      reviewableFiles.map(async (f): Promise<EnrichedFile> => {
+        if (!isAstSupportedFile(f.filename)) return f;
+        const changedLines = anchorMap.get(f.filename) ?? new Set<number>();
+        if (changedLines.size === 0) return f;
+        const content = await fetchFileContent(octokit, {
+          owner: repository.owner,
+          repo: repository.name,
+          path: f.filename,
+          ref: headSha,
+        });
+        if (!content) return f;
+        const logicalBlocks = extractLogicalBlocks(content, f.filename, changedLines);
+        if (logicalBlocks.length === 0) return f;
+        logStructured("astExtractor.blocks.extracted", {
+          file: f.filename,
+          blockCount: logicalBlocks.length,
+        });
+        return { ...f, logicalBlocks };
+      }),
+    );
+
     const { comments, summary } = await reviewDiffFilesWithAI({
       pr: { title: pr.data.title, body: pr.data.body },
-      files: reviewableFiles,
+      files: enrichedFiles,
       repoContext,
     });
 
@@ -266,11 +308,6 @@ const worker = new Worker<JobData>(
       pullRequestNumber,
     });
 
-    const headSha = pr.data.head.sha;
-
-    // Reduce noise:
-    // - Inline only critical/warning with confidence != low
-    // - Cap total and per-file
     const MAX_INLINE = Number(process.env.MAX_INLINE_COMMENTS || 8);
     const MAX_INLINE_PER_FILE = Number(process.env.MAX_INLINE_PER_FILE || 2);
 
