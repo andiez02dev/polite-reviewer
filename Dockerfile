@@ -1,3 +1,17 @@
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY tsconfig.json ./
+COPY src ./src
+
+RUN npm run build
+
+# ---
+
 FROM node:22-alpine AS base
 
 WORKDIR /app
@@ -5,15 +19,10 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 COPY package*.json ./
-
 RUN npm install --only=production
 
-COPY src ./src
-COPY README.md ./
+COPY --from=builder /app/dist ./dist
 
-# Expose the HTTP port for the webhook server
 EXPOSE 3000
 
-# Default command runs the webhook server
-CMD ["node", "src/server.js"]
-
+CMD ["node", "dist/server.js"]

@@ -33,6 +33,6 @@ services:
       - REDIS_HOST=redis
     volumes:
       - ./keys:/app/keys:ro
-    command: ["node", "src/worker.js"]
+    command: ["node", "dist/worker.js"]
     restart: unless-stopped
 
