@@ -1,7 +1,13 @@
+import type { ReviewableFile, RepoContext } from "../types.js";
 import { annotatePatchWithNewLineNumbers } from "../analysis/diff-parser.js";
 
-export function buildReviewPrompt({ pr, files, repoContext }) {
-  const contextParts = [];
+export function buildReviewPrompt(params: {
+  pr: { title: string; body: string | null };
+  files: ReviewableFile[];
+  repoContext: RepoContext;
+}): { systemPrompt: string; userPrompt: string } {
+  const { pr, files, repoContext } = params;
+  const contextParts: string[] = [];
 
   if (repoContext.packageJson) {
     contextParts.push(`package.json:\n${repoContext.packageJson}`);
@@ -25,9 +31,7 @@ export function buildReviewPrompt({ pr, files, repoContext }) {
   const filesSummary = files
     .map(
       (f) =>
-        `File: ${f.filename} (status: ${f.status}, +${f.additions} -${f.deletions})\nPatch (with new-file line numbers):\n${annotatePatchWithNewLineNumbers(
-          f.patch,
-        )}`,
+        `File: ${f.filename} (status: ${f.status}, +${f.additions} -${f.deletions})\nPatch (with new-file line numbers):\n${annotatePatchWithNewLineNumbers(f.patch)}`,
     )
     .join("\n\n----------------\n\n");
 
@@ -41,7 +45,7 @@ Review this pull request thoroughly.
 
 Pull request title: ${pr.title}
 Pull request description:
-${pr.body || "(no description)"}
+${pr.body ?? "(no description)"}
 
 ${contextBlock}
 
@@ -100,7 +104,7 @@ Return ONLY this JSON structure:
   ],
   "summary": {
     "overview": "Brief summary of PR quality and main findings",
-    "verdict": "approve" | "request_changes" | "comment",
+    "verdict": "approve",
     "criticalIssues": [
       { "file": "src/file.js", "line": 10, "title": "Brief issue title" }
     ],

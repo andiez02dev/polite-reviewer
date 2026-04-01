@@ -1,8 +1,9 @@
 import dotenv from "dotenv";
+import type { AppConfig } from "./types.js";
 
 dotenv.config();
 
-function required(name) {
+function required(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(`Missing required environment variable ${name}`);
@@ -10,7 +11,7 @@ function required(name) {
   return value;
 }
 
-export const config = {
+export const config: AppConfig = {
   port: Number(process.env.PORT || 3000),
   geminiApiKey: required("GEMINI_API_KEY"),
   geminiModel: process.env.GEMINI_MODEL || "gemini-1.5-flash",
@@ -25,7 +26,7 @@ export const config = {
   },
 };
 
-export function logStructured(message, details = {}) {
+export function logStructured(message: string, details: Record<string, unknown> = {}): void {
   const entry = {
     ts: new Date().toISOString(),
     msg: message,
@@ -34,4 +35,3 @@ export function logStructured(message, details = {}) {
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(entry));
 }
-

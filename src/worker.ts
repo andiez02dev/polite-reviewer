@@ -6,20 +6,28 @@ import { buildReviewableFiles } from "./analysis/file-filter.js";
 import { deduplicateComments } from "./analysis/comment-deduplicator.js";
 import { clampToNearestAnchor, extractNewLineAnchorsFromPatch } from "./analysis/diff-parser.js";
 import { config, logStructured } from "./config.js";
+import type { JobData, AIReviewComment, AIReviewSummary } from "./types.js";
+import type { Octokit } from "@octokit/rest";
 
-const redisOptions = process.env.REDIS_URL
+type RedisConnection = string | { host: string; port: number };
+
+const redisOptions: RedisConnection = process.env.REDIS_URL
   ? process.env.REDIS_URL
   : {
       host: config.redis.host,
       port: config.redis.port,
     };
 
-const connection = new IORedis(redisOptions, {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const connection = new (IORedis as any)(redisOptions, {
   maxRetriesPerRequest: null,
 });
 
-async function fetchPrFiles(octokit, { owner, repo, pullNumber }) {
-  const files = [];
+async function fetchPrFiles(
+  octokit: Octokit,
+  { owner, repo, pullNumber }: { owner: string; repo: string; pullNumber: number },
+): Promise<unknown[]> {
+  const files: unknown[] = [];
   let page = 1;
   const perPage = 100;
 
@@ -43,8 +51,11 @@ async function fetchPrFiles(octokit, { owner, repo, pullNumber }) {
   return files;
 }
 
-async function loadRepoContext(octokit, { owner, repo }) {
-  const context = {
+async function loadRepoContext(
+  octokit: Octokit,
+  { owner, repo }: { owner: string; repo: string },
+): Promise<{ packageJson: string | null; tsconfig: string | null; configFiles: Array<{ path: string; content: string }> }> {
+  const context: { packageJson: string | null; tsconfig: string | null; configFiles: Array<{ path: string; content: string }> } = {
     packageJson: null,
     tsconfig: null,
     configFiles: [],
@@ -56,8 +67,9 @@ async function loadRepoContext(octokit, { owner, repo }) {
       repo,
       path: "package.json",
     });
-    if (!Array.isArray(pkg.data) && "content" in pkg.data && pkg.data.content) {
-      const buff = Buffer.from(pkg.data.content, pkg.data.encoding || "base64");
+    if ("content" in pkg.data && typeof pkg.data.content === "string" && pkg.data.content) {
+      const encoding = "encoding" in pkg.data ? (pkg.data.encoding as BufferEncoding) : "base64";
+      const buff = Buffer.from(pkg.data.content, encoding);
       context.packageJson = buff.toString("utf8");
     }
   } catch (err) {
@@ -70,8 +82,9 @@ async function loadRepoContext(octokit, { owner, repo }) {
       repo,
       path: "tsconfig.json",
     });
-    if (!Array.isArray(tsconfig.data) && "content" in tsconfig.data && tsconfig.data.content) {
-      const buff = Buffer.from(tsconfig.data.content, tsconfig.data.encoding || "base64");
+    if ("content" in tsconfig.data && typeof tsconfig.data.content === "string" && tsconfig.data.content) {
+      const encoding = "encoding" in tsconfig.data ? (tsconfig.data.encoding as BufferEncoding) : "base64";
+      const buff = Buffer.from(tsconfig.data.content, encoding);
       context.tsconfig = buff.toString("utf8");
     }
   } catch {
@@ -87,12 +100,13 @@ async function loadRepoContext(octokit, { owner, repo }) {
     "vitest.config.ts",
   ];
 
-  for (const path of candidateConfigFiles) {
+  for (const filePath of candidateConfigFiles) {
     try {
-      const res = await octokit.repos.getContent({ owner, repo, path });
-      if (!Array.isArray(res.data) && "content" in res.data && res.data.content) {
-        const buff = Buffer.from(res.data.content, res.data.encoding || "base64");
-        context.configFiles.push({ path, content: buff.toString("utf8") });
+      const res = await octokit.repos.getContent({ owner, repo, path: filePath });
+      if ("content" in res.data && typeof res.data.content === "string" && res.data.content) {
+        const encoding = "encoding" in res.data ? (res.data.encoding as BufferEncoding) : "base64";
+        const buff = Buffer.from(res.data.content, encoding);
+        context.configFiles.push({ path: filePath, content: buff.toString("utf8") });
       }
     } catch {
       // ignore missing optional files
@@ -102,7 +116,7 @@ async function loadRepoContext(octokit, { owner, repo }) {
   return context;
 }
 
-function formatCommentBody(comment) {
+function formatCommentBody(comment: AIReviewComment): string {
   const severityIcon =
     comment.severity === "critical"
       ? "❌"
@@ -137,7 +151,7 @@ function formatCommentBody(comment) {
   return body;
 }
 
-function formatSummaryBody(summary, comments) {
+function formatSummaryBody(summary: AIReviewSummary, _comments: AIReviewComment[]): string {
   const criticalCount = summary.criticalIssues?.length ?? 0;
   const warningCount = summary.warnings?.length ?? 0;
   const suggestionCount = summary.suggestions?.length ?? 0;
@@ -192,7 +206,7 @@ function formatSummaryBody(summary, comments) {
   return body;
 }
 
-const worker = new Worker(
+const worker = new Worker<JobData>(
   "ai-pr-reviews",
   async (job) => {
     const { installationId, repository, pullRequestNumber } = job.data;
@@ -219,7 +233,7 @@ const worker = new Worker(
     ]);
 
     const reviewableFiles = buildReviewableFiles(files);
-    const anchorMap = new Map();
+    const anchorMap = new Map<string, Set<number>>();
     for (const f of reviewableFiles) {
       anchorMap.set(f.filename, extractNewLineAnchorsFromPatch(f.patch));
     }
@@ -266,8 +280,8 @@ const worker = new Worker(
         c.confidence !== "low",
     );
 
-    const inlineByFile = new Map();
-    const inlineComments = [];
+    const inlineByFile = new Map<string, number>();
+    const inlineComments: AIReviewComment[] = [];
     for (const c of inlineCandidates) {
       if (inlineComments.length >= MAX_INLINE) break;
       const n = inlineByFile.get(c.file) || 0;

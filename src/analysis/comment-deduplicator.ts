@@ -1,4 +1,6 @@
-function normalizeText(text) {
+import type { AIReviewComment } from "../types.js";
+
+function normalizeText(text: string): string {
   return text
     .toLowerCase()
     .replace(/\s+/g, " ")
@@ -6,9 +8,9 @@ function normalizeText(text) {
     .trim();
 }
 
-export function deduplicateComments(comments) {
-  const seen = new Map();
-  const result = [];
+export function deduplicateComments(comments: AIReviewComment[]): AIReviewComment[] {
+  const seen = new Map<string, boolean>();
+  const result: AIReviewComment[] = [];
 
   for (const comment of comments) {
     const keyBase = `${comment.file}:${comment.line}`;
@@ -26,8 +28,16 @@ export function deduplicateComments(comments) {
   return result;
 }
 
-export function groupCommentsBySeverity(comments) {
-  const groups = {
+export function groupCommentsBySeverity(comments: AIReviewComment[]): {
+  critical: AIReviewComment[];
+  warning: AIReviewComment[];
+  suggestion: AIReviewComment[];
+} {
+  const groups: {
+    critical: AIReviewComment[];
+    warning: AIReviewComment[];
+    suggestion: AIReviewComment[];
+  } = {
     critical: [],
     warning: [],
     suggestion: [],

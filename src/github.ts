@@ -8,10 +8,8 @@ import { config, logStructured } from "./config.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-function loadPrivateKey() {
-  // Preferred: read private key from env (better for platforms like Railway)
+function loadPrivateKey(): string {
   if (process.env.GITHUB_PRIVATE_KEY) {
-    // Support both plain multiline PEM and \n-escaped single-line form
     return process.env.GITHUB_PRIVATE_KEY.replace(/\\n/g, "\n");
   }
 
@@ -22,7 +20,7 @@ function loadPrivateKey() {
   return fs.readFileSync(keyPath, "utf8");
 }
 
-export async function createGitHubClientForInstallation(installationId) {
+export async function createGitHubClientForInstallation(installationId: number): Promise<Octokit> {
   logStructured("github.installationToken.created", { installationId });
 
   const privateKey = loadPrivateKey();
@@ -37,8 +35,16 @@ export async function createGitHubClientForInstallation(installationId) {
   });
 }
 
-export async function getInstallationIdFromPayload(payload) {
-  if (payload?.installation?.id) {
+export async function getInstallationIdFromPayload(payload: unknown): Promise<number> {
+  if (
+    payload !== null &&
+    typeof payload === "object" &&
+    "installation" in payload &&
+    payload.installation !== null &&
+    typeof payload.installation === "object" &&
+    "id" in payload.installation &&
+    typeof payload.installation.id === "number"
+  ) {
     return payload.installation.id;
   }
   if (config.githubInstallationId) {
@@ -46,5 +52,3 @@ export async function getInstallationIdFromPayload(payload) {
   }
   throw new Error("Missing installation id in payload and GITHUB_INSTALLATION_ID is not set");
 }
-
-

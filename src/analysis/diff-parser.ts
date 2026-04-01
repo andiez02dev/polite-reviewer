@@ -1,5 +1,5 @@
-export function extractNewLineAnchorsFromPatch(patch) {
-  const anchorLines = new Set();
+export function extractNewLineAnchorsFromPatch(patch: string | undefined | null): Set<number> {
+  const anchorLines = new Set<number>();
   if (!patch) return anchorLines;
 
   let oldLine = 0;
@@ -9,8 +9,7 @@ export function extractNewLineAnchorsFromPatch(patch) {
 
   for (const line of lines) {
     if (line.startsWith("@@")) {
-      // @@ -oldStart,oldLen +newStart,newLen @@
-      const match = line.match(/@@\s+-([0-9]+)(?:,[0-9]+)?\s+\\+([0-9]+)(?:,[0-9]+)?\s+@@/);
+      const match = line.match(/@@\s+-([0-9]+)(?:,[0-9]+)?\s+\+([0-9]+)(?:,[0-9]+)?\s+@@/);
       if (match) {
         oldLine = Number(match[1]);
         newLine = Number(match[2]);
@@ -18,25 +17,20 @@ export function extractNewLineAnchorsFromPatch(patch) {
       continue;
     }
 
-    // Skip diff headers
     if (line.startsWith("diff --git") || line.startsWith("index ")) continue;
     if (line.startsWith("--- ") || line.startsWith("+++ ")) continue;
 
     if (line.startsWith("+")) {
-      // Added line exists only in new file
       anchorLines.add(newLine);
       newLine += 1;
       continue;
     }
 
     if (line.startsWith("-")) {
-      // Removed line exists only in old file
       oldLine += 1;
       continue;
     }
 
-    // Context line (starts with space or empty string)
-    // GitHub review comments can be anchored to context lines in the diff too.
     anchorLines.add(newLine);
     oldLine += 1;
     newLine += 1;
@@ -45,12 +39,11 @@ export function extractNewLineAnchorsFromPatch(patch) {
   return anchorLines;
 }
 
-export function clampToNearestAnchor(targetLine, anchors) {
+export function clampToNearestAnchor(targetLine: number, anchors: Set<number>): number | null {
   if (!anchors || anchors.size === 0) return null;
   if (anchors.has(targetLine)) return targetLine;
 
-  // Find nearest anchor by absolute distance
-  let best = null;
+  let best: number | null = null;
   let bestDist = Infinity;
   for (const a of anchors) {
     const dist = Math.abs(a - targetLine);
@@ -62,18 +55,18 @@ export function clampToNearestAnchor(targetLine, anchors) {
   return best;
 }
 
-export function annotatePatchWithNewLineNumbers(patch) {
+export function annotatePatchWithNewLineNumbers(patch: string | undefined | null): string {
   if (!patch) return "";
 
   let oldLine = 0;
   let newLine = 0;
 
-  const out = [];
+  const out: string[] = [];
   const lines = patch.split("\n");
 
   for (const line of lines) {
     if (line.startsWith("@@")) {
-      const match = line.match(/@@\s+-([0-9]+)(?:,[0-9]+)?\s+\\+([0-9]+)(?:,[0-9]+)?\s+@@/);
+      const match = line.match(/@@\s+-([0-9]+)(?:,[0-9]+)?\s+\+([0-9]+)(?:,[0-9]+)?\s+@@/);
       if (match) {
         oldLine = Number(match[1]);
         newLine = Number(match[2]);
@@ -110,4 +103,3 @@ export function annotatePatchWithNewLineNumbers(patch) {
 
   return out.join("\n");
 }
-
