@@ -1,13 +1,13 @@
 import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { createGitHubClientForInstallation } from "./github.js";
-import { reviewDiffFilesWithAI } from "./ai.js";
-import { buildReviewableFiles } from "./analysis/file-filter.js";
+import { reviewSingleFile } from "./ai.js";
+import { buildReviewableFiles, categorizeFile } from "./analysis/file-filter.js";
 import { deduplicateComments } from "./analysis/comment-deduplicator.js";
 import { clampToNearestAnchor, extractNewLineAnchorsFromPatch } from "./analysis/diff-parser.js";
 import { extractLogicalBlocks, isAstSupportedFile } from "./analysis/ast-extractor.js";
 import { config, logStructured } from "./config.js";
-import type { JobData, AIReviewComment, AIReviewSummary, EnrichedFile } from "./types.js";
+import type { JobData, AIReviewComment, AIReviewSummary, SummaryIssue, EnrichedFile } from "./types.js";
 import type { Octokit } from "@octokit/rest";
 
 type RedisConnection = string | { host: string; port: number };
@@ -295,13 +295,64 @@ const worker = new Worker<JobData>(
       }),
     );
 
-    const { comments, summary } = await reviewDiffFilesWithAI({
-      pr: { title: pr.data.title, body: pr.data.body },
-      files: enrichedFiles,
-      repoContext,
+    const allComments: AIReviewComment[] = [];
+
+    for (const f of enrichedFiles) {
+      const category = categorizeFile(f.filename);
+
+      const extractedContext =
+        f.logicalBlocks && f.logicalBlocks.length > 0
+          ? f.logicalBlocks
+              .map(
+                (b) =>
+                  `// Changed lines: ${b.coveredChangedLines.join(", ")} | Node: ${b.nodeKind}\n${b.text}`,
+              )
+              .join("\n\n---\n\n")
+          : "";
+
+      try {
+        const comments = await reviewSingleFile({
+          pr: { title: pr.data.title, body: pr.data.body },
+          file: {
+            filename: f.filename,
+            diffContent: f.patch,
+            extractedContext,
+          },
+          category,
+          repoContext,
+        });
+        allComments.push(...comments);
+      } catch (err) {
+        logStructured("worker.ai.file.error", {
+          file: f.filename,
+          error: String(err),
+        });
+      }
+    }
+
+    const dedupedComments = deduplicateComments(allComments);
+
+    // Build summary programmatically — no extra LLM call needed
+    const criticalIssues = dedupedComments.filter((c) => c.severity === "critical");
+    const warnings = dedupedComments.filter((c) => c.severity === "warning");
+    const suggestions = dedupedComments.filter((c) => c.severity === "suggestion");
+
+    const toSummaryIssue = (c: AIReviewComment): SummaryIssue => ({
+      file: c.file,
+      line: c.line,
+      title: c.title,
     });
 
-    const dedupedComments = deduplicateComments(comments);
+    const summary: AIReviewSummary = {
+      overview:
+        dedupedComments.length === 0
+          ? `PR Police reviewed ${enrichedFiles.length} file(s). No issues found.`
+          : `PR Police reviewed ${enrichedFiles.length} file(s). Found ${criticalIssues.length} critical issue(s), ${warnings.length} warning(s), and ${suggestions.length} suggestion(s).`,
+      verdict: criticalIssues.length > 0 ? "request_changes" : "approve",
+      criticalIssues: criticalIssues.map(toSummaryIssue),
+      warnings: warnings.map(toSummaryIssue),
+      suggestions: suggestions.map(toSummaryIssue),
+    };
 
     logStructured("worker.ai.comments.generated", {
       count: dedupedComments.length,

@@ -1,18 +1,60 @@
 ## PR Police Bot
 
-An AI-powered GitHub App that automatically reviews pull requests using Gemini. It receives GitHub webhooks, enqueues background jobs with BullMQ + Redis, and posts inline review comments back to the PR.
+An AI-powered GitHub App that automatically reviews pull requests using Gemini. It receives GitHub webhooks, enqueues background jobs with BullMQ + Redis, performs AST-based context extraction, and posts inline review comments back to the PR.
+
+### How it works
+
+```
+GitHub Webhook → server.ts → BullMQ Queue (Redis)
+                                    ↓
+                              worker.ts
+                                    ↓
+                    Fetch PR files (GitHub API)
+                                    ↓
+                    Filter files (file-filter.ts)
+                                    ↓
+                    Fetch full file content + AST extraction (ast-extractor.ts)
+                    [extracts logical blocks: functions, classes, interfaces]
+                                    ↓
+                    Build prompt with logical blocks (prompt-builder.ts)
+                                    ↓
+                    Gemini AI review (ai.ts)
+                                    ↓
+                    Post inline comments + summary (worker.ts)
+```
+
+**Webhook flow**
+- GitHub sends a `pull_request` or `issue_comment` webhook
+- Server verifies HMAC-SHA256 signature and enqueues a `review-pr` job
+
+**Worker flow**
+- Fetches PR files and filters out binaries, lock files, generated files
+- For each TypeScript/JavaScript file: fetches full content and uses `ts-morph` to extract the logical blocks (functions, classes, interfaces) containing changed lines — instead of sending raw diffs
+- Sends enriched context to Gemini with structured JSON output format
+- Posts inline review comments (critical/warning only, max 8 total, max 2 per file) and a summary comment
 
 ### Project structure
 
-- **`src/server.js`**: Express webhook server (`POST /webhook`) for `pull_request` and `issue_comment` events.
-- **`src/worker.js`**: BullMQ worker that processes review jobs, calls Gemini, and posts comments.
-- **`src/queue.js`**: BullMQ queue setup and Redis connection.
-- **`src/github.js`**: GitHub App authentication and installation client helpers.
-- **`src/ai.js`**: Gemini integration and review logic.
-- **`src/diff.js`**: Diff parsing and filtering utilities.
-- **`src/config.js`**: Environment configuration and structured logging helper.
-- **`keys/github-private-key.pem`**: GitHub App private key (PEM).
-- **`.env.example`**: Example environment configuration.
+```
+src/
+  server.ts                    — Express webhook server (POST /webhook)
+  worker.ts                    — BullMQ worker, orchestrates the review pipeline
+  queue.ts                     — BullMQ queue + Redis connection
+  github.ts                    — GitHub App auth, Octokit client helpers
+  ai.ts                        — Gemini API integration, response parsing
+  config.ts                    — Environment config, structured logging
+  types.ts                     — Shared TypeScript interfaces
+  diff.ts                      — Legacy diff utilities (unused in main pipeline)
+  ai/
+    prompt-builder.ts          — Builds system/user prompts for Gemini
+  analysis/
+    ast-extractor.ts           — ts-morph AST extraction of logical blocks
+    diff-parser.ts             — Git diff parsing, line anchor mapping
+    file-filter.ts             — PR file filtering and patch normalization
+    comment-deduplicator.ts    — Deduplicates AI-generated comments
+  utils/
+    logger.ts                  — Structured logging helpers
+```
 
 ### Requirements
 
@@ -20,8 +62,8 @@ An AI-powered GitHub App that automatically reviews pull requests using Gemini. 
 - Redis (local or remote)
 - A GitHub App with:
   - Webhook configured
-  - Permissions for pull requests and contents
-  - Installed on the target repository or organization
+  - Permissions: Pull requests (Read & write), Contents (Read-only), Issues (Read & write)
+  - Events: `Pull request`, `Issue comment`
   - Private key downloaded as a `.pem` file
 
 ### Setup
@@ -29,121 +71,100 @@ An AI-powered GitHub App that automatically reviews pull requests using Gemini. 
 1. **Install dependencies**
 
 ```bash
-cd polite-reviewer
 npm install
 ```
 
 2. **Configure environment**
 
-- Copy the example env and fill in values:
-
 ```bash
 cp .env.example .env
 ```
 
-Required variables:
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | ✅ | Gemini API key |
+| `GEMINI_MODEL` | | Model name (default: `gemini-1.5-flash`) |
+| `GITHUB_APP_ID` | ✅ | GitHub App ID |
+| `GITHUB_PRIVATE_KEY` | ✅* | Full PEM content (recommended for Railway/cloud) |
+| `GITHUB_PRIVATE_KEY_PATH` | ✅* | Path to PEM file (for local dev) |
+| `GITHUB_INSTALLATION_ID` | | Default installation ID if not in webhook payload |
+| `WEBHOOK_SECRET` | | HMAC secret for webhook signature verification |
+| `PORT` | | Express server port (default: `3000`) |
+| `REDIS_URL` | ✅* | Full Redis URL (e.g. Railway: `redis://default:pass@host:6379`) |
+| `REDIS_HOST` | ✅* | Redis host for local dev (default: `127.0.0.1`) |
+| `REDIS_PORT` | | Redis port (default: `6379`) |
+| `MAX_INLINE_COMMENTS` | | Max inline comments per review (default: `8`) |
+| `MAX_INLINE_PER_FILE` | | Max inline comments per file (default: `2`) |
+| `GITHUB_BOT_NAME` | | Bot slug for duplicate comment detection (default: `polite-reviewer`) |
 
-- **`PORT`**: Port for the Express server (default `3000`).
-- **`GITHUB_APP_ID`**: Your GitHub App ID.
-- **`GITHUB_INSTALLATION_ID`** (optional): Default installation id if not provided in payloads.
-- **`GITHUB_PRIVATE_KEY`** or **`GITHUB_PRIVATE_KEY_PATH`**:
-  - `GITHUB_PRIVATE_KEY` (recommended for cloud providers like Railway): the full PEM content as an env var (use `\n` for newlines if required by the platform).
-  - `GITHUB_PRIVATE_KEY_PATH` (for local dev): path to the GitHub App private key PEM (default `./keys/github-private-key.pem`).
-- **`WEBHOOK_SECRET`**: Shared secret for webhook signatures.
-- **Redis**:
-  - Local dev: `REDIS_HOST` (default `127.0.0.1`), `REDIS_PORT` (default `6379`).
-  - Managed Redis (e.g. Railway): `REDIS_URL` such as `redis://default:password@host:6379`.
-- **`GEMINI_API_KEY`**: Your Gemini API key.
-- **`GEMINI_MODEL`**: Gemini model to use (e.g. `gemini-2.5-flash`).
+*Use either `GITHUB_PRIVATE_KEY` or `GITHUB_PRIVATE_KEY_PATH`. Use either `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`.
 
-3. **Add GitHub private key**
+3. **Add GitHub private key** (local dev only)
 
-Save your GitHub App private key as `keys/github-private-key.pem` (or update `GITHUB_PRIVATE_KEY_PATH` to match your location).
+```bash
+# Save your GitHub App private key to:
+keys/github-private-key.pem
+```
+
+### Running locally
+
+Start Redis:
+
+```bash
+docker run --name ai-review-redis -p 6379:6379 -d redis:7-alpine
+```
+
+Start the webhook server:
+
+```bash
+npm run dev
+```
+
+Start the worker (separate terminal):
+
+```bash
+npm run dev:worker
+```
+
+Expose locally with ngrok:
+
+```bash
+ngrok http 3000
+# Set webhook URL in GitHub App settings to: https://<id>.ngrok.io/webhook
+```
+
+### Running with Docker
+
+```bash
+docker-compose up
+```
+
+### Scripts
+
+| Script | Description |
+|---|---|
+| `npm run dev` | Start server with nodemon + tsx (no build needed) |
+| `npm run dev:worker` | Start worker with nodemon + tsx |
+| `npm start` | Start server from compiled `dist/` |
+| `npm run worker` | Start worker from compiled `dist/` |
+| `npm run build` | Compile TypeScript → `dist/` |
+| `npm run typecheck` | Type-check without emitting |
+
+### Triggering a review
+
+**Automatic**: Open or push to a pull request — bot reviews automatically.
+
+**Manual**: Comment on any PR:
+
+```
+/polite-review
+```
 
 ### GitHub App configuration
 
 In your GitHub App settings:
 
 - **Webhook URL**: `https://your-domain.example.com/webhook`
-- **Webhook secret**: Set to the same value as `WEBHOOK_SECRET` in `.env`.
-- **Permissions (minimum)**:
-  - Pull requests: **Read & write**
-  - Contents: **Read-only**
-  - Issues: **Read & write** (for comments)
-- **Events**:
-  - `Pull request`
-  - `Issue comment`
-
-Install the app on the repositories or organizations you want the bot to monitor.
-
-### Running Redis
-
-Locally via Docker:
-
-```bash
-docker run --name ai-review-redis -p 6379:6379 -d redis:7-alpine
-```
-
-Or use a managed Redis instance and point `REDIS_HOST` / `REDIS_PORT` at it.
-
-### Running the server and worker
-
-Start the webhook server:
-
-```bash
-npm run dev
-# or
-npm start
-```
-
-Start the worker (in a separate terminal):
-
-```bash
-npm run worker
-```
-
-Both processes require access to the same Redis instance.
-
-### Testing webhooks with ngrok
-
-Expose your local server using ngrok:
-
-```bash
-ngrok http 3000
-```
-
-Copy the HTTPS URL from ngrok (e.g. `https://abc123.ngrok.io`) and set your GitHub App webhook URL to:
-
-```text
-https://abc123.ngrok.io/webhook
-```
-
-Trigger events by opening or updating a pull request, or by commenting `/polite-review` on an existing pull request.
-
-### How it works
-
-- **Webhook flow**
-  - GitHub sends a `pull_request` or `issue_comment` webhook.
-  - The server verifies the signature (if `WEBHOOK_SECRET` is set) and enqueues a `review-pr` job.
-- **Worker flow**
-  - The worker pulls jobs from the `ai-pr-reviews` queue.
-  - For each job, it:
-    - Authenticates as the GitHub App installation.
-    - Fetches PR files via `GET /repos/{owner}/{repo}/pulls/{pull_number}/files`.
-    - Filters and truncates diffs via `src/diff.js`.
-    - Sends file diffs to Gemini (`src/ai.js`).
-    - Parses structured JSON responses and posts inline review comments via:
-      - `POST /repos/{owner}/{repo}/pulls/{pull_number}/comments`.
-
-### Commands
-
-- Automatic review:
-  - Open or update a pull request; the bot will enqueue a review job.
-- Manual review:
-  - Add a comment on a pull request with the body:
-
-```text
-/polite-review
-```
-
-This triggers a manual review job for that PR.
+- **Webhook secret**: Same value as `WEBHOOK_SECRET`
+- **Permissions**: Pull requests (Read & write), Contents (Read-only), Issues (Read & write)
+- **Events**: Pull request, Issue comment

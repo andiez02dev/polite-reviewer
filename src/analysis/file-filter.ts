@@ -1,5 +1,45 @@
 import type { ReviewableFile } from "../types.js";
 
+export enum FileCategory {
+  UI_COMPONENT = "UI_COMPONENT",
+  LOGIC_HOOK = "LOGIC_HOOK",
+  API_SERVICE = "API_SERVICE",
+  GENERAL = "GENERAL",
+}
+
+/**
+ * Categorize a file path into a review role so the prompt-builder can
+ * apply the most relevant review lens for that file type.
+ */
+export function categorizeFile(filePath: string): FileCategory {
+  const lower = filePath.toLowerCase();
+  const ext = lower.slice(lower.lastIndexOf("."));
+
+  // UI_COMPONENT: TSX/JSX files, or paths with component/view/ui segments
+  if (
+    ext === ".tsx" ||
+    ext === ".jsx" ||
+    /\/components\/|\/views\/|\/ui\//.test(lower)
+  ) {
+    return FileCategory.UI_COMPONENT;
+  }
+
+  // API_SERVICE: service/api/controller/repository paths
+  if (/\/services\/|\/api\/|\/controllers\/|\/repositories\//.test(lower)) {
+    return FileCategory.API_SERVICE;
+  }
+
+  // LOGIC_HOOK: hook/utils/helpers paths, or formula/calculator keywords
+  if (
+    /\/hooks?\/|\/utils\/|\/helpers\//.test(lower) ||
+    /formula|calculator/.test(lower)
+  ) {
+    return FileCategory.LOGIC_HOOK;
+  }
+
+  return FileCategory.GENERAL;
+}
+
 const DEFAULT_MAX_PATCH_LINES = 800;
 
 const SKIP_PATH_SUBSTRINGS = [

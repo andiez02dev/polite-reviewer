@@ -1,169 +1,155 @@
-import type { EnrichedFile, RepoContext } from "../types.js";
-import { annotatePatchWithNewLineNumbers } from "../analysis/diff-parser.js";
+import type { RepoContext } from "../types.js";
+import { FileCategory } from "../analysis/file-filter.js";
 
-export function buildReviewPrompt(params: {
+// ---------------------------------------------------------------------------
+// Role-based instructions — injected per file based on its category
+// ---------------------------------------------------------------------------
+
+const ROLE_INSTRUCTIONS: Record<FileCategory, string> = {
+  [FileCategory.UI_COMPONENT]: `You are a senior frontend engineer specialising in UI quality.
+Focus STRICTLY on:
+- Accessibility (a11y): missing ARIA roles/labels, keyboard navigation, focus management, colour contrast issues
+- Render cycle optimisation: unnecessary re-renders, missing React.memo / useMemo / useCallback
+- DOM structure: invalid nesting, semantic HTML correctness
+- Component API design: prop drilling, missing default props, incorrect key usage in lists
+Do NOT comment on business logic, data fetching, or backend concerns.`,
+
+  [FileCategory.LOGIC_HOOK]: `You are a senior engineer performing a [CRITICAL MENTAL EXECUTION] review.
+For every function and hook you MUST:
+1. Trace the algorithm step-by-step with concrete example inputs to verify correctness
+2. Detect circular dependencies or infinite loops in recursive logic
+3. Verify array mutations — check that sort/filter/map do not mutate the original array and that sort comparators satisfy transitivity
+4. Strictly audit React hook dependency arrays (exhaustive-deps): identify stale closures, missing deps, and over-specified deps that cause infinite loops
+5. Check for off-by-one errors, incorrect boundary conditions, and floating-point precision issues
+Flag anything that would produce a wrong result on a valid input.`,
+
+  [FileCategory.API_SERVICE]: `You are a senior backend engineer reviewing a service/API layer.
+Focus on:
+- Data fetching correctness: pagination, cursor handling, missing await
+- Retry & resilience: missing retry logic, no timeout, swallowed errors
+- Payload mapping: field name mismatches, missing null-checks on API responses, incorrect type casts
+- Type safety: any-casts, missing runtime validation of external data
+- Error surfacing: errors silently caught and not re-thrown or logged
+- Security: exposed secrets, missing auth checks, SSRF risks in dynamic URLs`,
+
+  [FileCategory.GENERAL]: `You are a senior staff engineer performing a thorough code review.
+Focus on:
+- Logic bugs: null/undefined checks, edge cases, race conditions
+- Security: injection, auth bypass, secrets exposure
+- Performance: N+1 queries, memory leaks, blocking calls
+- Architecture: tight coupling, DRY violations, separation of concerns
+- Observability: missing logs, swallowed errors, missing metrics`,
+};
+
+// ---------------------------------------------------------------------------
+// JSON output schema — per-file comments only, no global summary
+// ---------------------------------------------------------------------------
+
+const JSON_OUTPUT_SCHEMA = `Return ONLY a JSON object with a single "comments" array — no markdown, no backticks, no extra fields.
+
+Each element in "comments" MUST conform to:
+{
+  "file": "<exact filename>",
+  "line": <new-file line number from the annotated diff>,
+  "severity": "critical" | "warning" | "suggestion",
+  "category": "bug" | "security" | "performance" | "architecture" | "observability" | "other",
+  "confidence": "high" | "medium" | "low",
+  "title": "<short title, max 60 chars>",
+  "problem": "<detailed explanation of what is wrong>",
+  "impact": "<why this matters / what could go wrong>",
+  "suggestion": "<exact replacement code for lines suggestionStartLine–suggestionEndLine>",
+  "suggestionStartLine": <first line of the replaced range>,
+  "suggestionEndLine": <last line of the replaced range>
+}
+
+Severity definitions:
+- "critical": bugs, security vulnerabilities, data loss risks — MUST fix before merge
+- "warning": performance issues, potential runtime problems, maintainability concerns
+- "suggestion": improvements that are nice-to-have but not blocking
+
+Rules for "suggestion" field:
+- Provide ONLY the replacement lines for [suggestionStartLine, suggestionEndLine] — no surrounding context
+- For multi-line expressions set suggestionEndLine to the line containing the closing token
+- When in doubt, be conservative and include more lines rather than fewer
+
+If there are no issues, return: { "comments": [] }
+Do NOT include any text outside the JSON object.`;
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+export interface SingleFilePromptParams {
   pr: { title: string; body: string | null };
-  files: EnrichedFile[];
-  repoContext: RepoContext;
-}): { systemPrompt: string; userPrompt: string } {
-  const { pr, files, repoContext } = params;
-  const contextParts: string[] = [];
+  file: {
+    filename: string;
+    diffContent: string;
+    extractedContext: string;
+  };
+  category: FileCategory;
+  repoContext?: RepoContext;
+}
 
-  if (repoContext.packageJson) {
-    contextParts.push(`package.json:\n${repoContext.packageJson}`);
+/**
+ * Build a role-specific prompt pair for reviewing a single file.
+ *
+ * systemPrompt — core persona, JSON-only output rule, severity definitions
+ * userPrompt   — PR context + repo context + role instructions + AST context + diff + schema
+ */
+export function buildSingleFilePrompt(
+  params: SingleFilePromptParams,
+): { systemPrompt: string; userPrompt: string } {
+  const { pr, file, category, repoContext } = params;
+
+  const systemPrompt =
+    "You are PR Police Bot, a senior staff engineer doing an in-depth, actionable code review. " +
+    "You focus on correctness, security, performance, maintainability, and code quality. " +
+    "You must respond ONLY with valid JSON — no Markdown, no backticks, no prose outside the JSON.";
+
+  const repoParts: string[] = [];
+  if (repoContext?.packageJson) {
+    repoParts.push(`package.json:\n${repoContext.packageJson}`);
   }
-  if (repoContext.tsconfig) {
-    contextParts.push(`tsconfig.json:\n${repoContext.tsconfig}`);
+  if (repoContext?.tsconfig) {
+    repoParts.push(`tsconfig.json:\n${repoContext.tsconfig}`);
   }
-  if (repoContext.configFiles && repoContext.configFiles.length > 0) {
-    contextParts.push(
+  if (repoContext?.configFiles && repoContext.configFiles.length > 0) {
+    repoParts.push(
       `Key config files:\n${repoContext.configFiles
         .map((f) => `- ${f.path}\n${f.content}`)
         .join("\n\n")}`,
     );
   }
-
-  const contextBlock =
-    contextParts.length > 0
-      ? `Repository context:\n\n${contextParts.join("\n\n")}\n\n`
+  const repoBlock =
+    repoParts.length > 0
+      ? `## Repository context\n\n${repoParts.join("\n\n")}\n\n`
       : "";
 
-  const filesSummary = files
-    .map((f) => {
-      const header = `File: ${f.filename} (status: ${f.status}, +${f.additions} -${f.deletions})`;
-      if (f.logicalBlocks && f.logicalBlocks.length > 0) {
-        const blocks = f.logicalBlocks
-          .map(
-            (b) =>
-              `// File: ${f.filename} | Changed lines: ${b.coveredChangedLines.join(", ")} | Node: ${b.nodeKind}\n${b.text}`,
-          )
-          .join("\n\n---\n\n");
-        return `${header}\nLogical blocks (AST-extracted):\n${blocks}`;
-      }
-      return `${header}\nPatch (with new-file line numbers):\n${annotatePatchWithNewLineNumbers(f.patch)}`;
-    })
-    .join("\n\n----------------\n\n");
+  const userPrompt = `## PR context
 
-  const systemPrompt =
-    "You are PR Police Bot, a senior staff engineer doing an in-depth, actionable code review. " +
-    "You focus on correctness, security, performance, maintainability, and code quality. " +
-    "You must respond ONLY with valid JSON, no Markdown or backticks.";
-
-  const userPrompt = `
-Review this pull request thoroughly.
-
-Pull request title: ${pr.title}
-Pull request description:
+Title: ${pr.title}
+Description:
 ${pr.body ?? "(no description)"}
 
-${contextBlock}
+${repoBlock}## Role-specific review instructions
 
-Changed files (diffs):
+${ROLE_INSTRUCTIONS[category]}
 
-${filesSummary}
+## Extracted file context (imports, types, changed scopes)
 
-## Your task
+\`\`\`typescript
+${file.extractedContext}
+\`\`\`
 
-Perform a deep code review focusing on:
-1. **Logic bugs** - null checks, edge cases, race conditions
-2. **Security issues** - injection, auth bypass, secrets exposure
-3. **Performance** - N+1 queries, memory leaks, blocking calls
-4. **Architecture** - coupling, separation of concerns, DRY violations
-5. **Observability** - missing logs, error handling
-6. **Race conditions** - duplicate processing, idempotency
+## File under review: ${file.filename}
 
-## Rules for comments
+\`\`\`diff
+${file.diffContent}
+\`\`\`
 
-**IMPORTANT: Only comment on real issues. Do NOT comment on:**
-- Minor style preferences (rename variable, add comment)
-- Obvious or trivial changes
-- Nit-picks that don't affect functionality
+## Output instructions
 
-**Every comment MUST be actionable with:**
-1. Clear explanation of the problem
-2. Why it matters (impact)
-3. Concrete code fix suggestion (provide the exact replacement code snippet directly in the "suggestion" field)
-4. Confidence level (high/medium/low)
-
-## Severity definitions
-
-- **critical**: Bugs, security vulnerabilities, data loss risks. MUST fix before merge.
-- **warning**: Performance issues, potential runtime problems, maintainability concerns. Should fix.
-- **suggestion**: Improvements that would be nice but not blocking.
-
-## JSON output format
-
-Return ONLY this JSON structure:
-
-{
-  "comments": [
-    {
-      "file": "src/server.js",
-      "line": 45,
-      "severity": "warning",
-      "category": "security",
-      "confidence": "high",
-      "title": "Webhook secret should not be hardcoded",
-      "problem": "The webhook secret is hardcoded in the source code, which is a security risk if the code is public.",
-      "impact": "Attackers could forge webhook requests if they obtain the secret from the repository.",
-      "suggestion": "const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET;\\n\\nif (!WEBHOOK_SECRET) {\\n  throw new Error('GITHUB_WEBHOOK_SECRET is required');\\n}",
-      "suggestionStartLine": 45,
-      "suggestionEndLine": 45
-    }
-  ],
-  "summary": {
-    "overview": "Brief summary of PR quality and main findings",
-    "verdict": "approve",
-    "criticalIssues": [
-      { "file": "src/file.js", "line": 10, "title": "Brief issue title" }
-    ],
-    "warnings": [
-      { "file": "src/file.js", "line": 20, "title": "Brief issue title" }
-    ],
-    "suggestions": [
-      { "file": "src/file.js", "line": 30, "title": "Brief issue title" }
-    ]
-  }
-}
-
-## Comment fields
-
-- "file": exact filename from the diff
-- "line": MUST be a line number shown in the annotated patch above (new-file line number)
-- "severity": "critical" | "warning" | "suggestion"
-- "category": "bug" | "security" | "performance" | "architecture" | "observability" | "other"
-- "confidence": "high" | "medium" | "low"
-- "title": short (< 60 chars) title for the issue
-- "problem": detailed explanation of what's wrong
-- "impact": why this matters, what could go wrong
-- "suggestion": the EXACT replacement code for the line range [suggestionStartLine, suggestionEndLine]. This will be rendered as a GitHub suggestion block. The suggestion MUST contain ONLY the replacement lines — no surrounding context, no extra lines outside the range. Keep suggestion code concise: no inline comments, no explanatory text inside the code block (put explanations in "problem" and "impact" fields instead).
-- "suggestionStartLine": the FIRST line number of the code block being replaced. MUST match the actual start of the code you want to replace in the file.
-- "suggestionEndLine": the LAST line number of the code block being replaced. MUST match the actual end of the code you want to replace. If your suggestion adds lines after the original block, extend suggestionEndLine to cover all original lines that will be replaced. The number of lines in "suggestion" does NOT need to equal suggestionEndLine minus suggestionStartLine plus 1 — GitHub allows expanding or shrinking the block.
-
-## Critical rule for suggestions
-
-The GitHub suggestion block replaces EXACTLY the lines from suggestionStartLine to suggestionEndLine (inclusive) with the content of "suggestion". Therefore:
-- If you want to replace lines 10-12 with new code, set suggestionStartLine=10, suggestionEndLine=12
-- If you want to insert new lines after line 10 without removing anything, set suggestionStartLine=10, suggestionEndLine=10 and include line 10's original content at the top of "suggestion" followed by the new lines
-- NEVER set suggestionStartLine=suggestionEndLine=X when your suggestion replaces multiple lines starting at X — always set the correct end line
-- For multi-line expressions (ternary operators, object literals, function calls spanning multiple lines), the suggestionEndLine MUST be the line containing the closing token (semicolon, closing brace, closing paren) of that expression
-- When in doubt about the exact end line, set suggestionEndLine to be conservative (include more lines rather than fewer)
-
-## If no issues found
-
-{
-  "comments": [],
-  "summary": {
-    "overview": "The changes look good. No significant issues found.",
-    "verdict": "approve",
-    "criticalIssues": [],
-    "warnings": [],
-    "suggestions": []
-  }
-}
-
-Do NOT include any text outside the JSON.
-`;
+${JSON_OUTPUT_SCHEMA}`;
 
   return { systemPrompt, userPrompt };
 }
