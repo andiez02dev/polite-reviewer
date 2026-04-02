@@ -360,19 +360,40 @@ const worker = new Worker<JobData>(
       }
     }
 
-    // Post a comprehensive summary comment
+    // Post a comprehensive summary comment (idempotent: skip if bot already commented)
     const summaryBody = formatSummaryBody(summary, dedupedComments);
 
-    await octokit.issues.createComment({
+    const existingComments = await octokit.issues.listComments({
       owner: repository.owner,
       repo: repository.name,
       issue_number: pullRequestNumber,
-      body: summaryBody,
+      per_page: 50,
     });
+
+    const botAppName = process.env.GITHUB_BOT_NAME ?? "polite-reviewer";
+    const alreadyCommented = existingComments.data.some(
+      (c) =>
+        c.body?.includes("PR Police Review Summary") &&
+        (c.performed_via_github_app?.slug?.includes(botAppName) ||
+          c.user?.type === "Bot"),
+    );
+
+    if (alreadyCommented) {
+      logStructured("worker.summary.skipped_duplicate", { pullRequestNumber });
+    } else {
+      await octokit.issues.createComment({
+        owner: repository.owner,
+        repo: repository.name,
+        issue_number: pullRequestNumber,
+        body: summaryBody,
+      });
+    }
   },
   {
     connection,
     concurrency: 2,
+    lockDuration: 300_000,   // 5 minutes — covers slow Gemini responses
+    lockRenewTime: 60_000,   // renew every 1 minute (lockDuration / 5)
   },
 );
 
