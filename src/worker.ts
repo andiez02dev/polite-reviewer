@@ -295,11 +295,29 @@ const worker = new Worker<JobData>(
       }),
     );
 
-    const allComments: AIReviewComment[] = [];
+    // Optimisation 4: cap the number of files reviewed, prioritising most-changed
+    const MAX_FILES = Number(process.env.MAX_FILES_TO_REVIEW ?? 10);
+    const filesToReview = enrichedFiles
+      .sort((a, b) => b.changes - a.changes)
+      .slice(0, MAX_FILES);
 
-    for (const f of enrichedFiles) {
+    if (filesToReview.length < enrichedFiles.length) {
+      logStructured("worker.files.capped", {
+        total: enrichedFiles.length,
+        reviewing: filesToReview.length,
+        pullRequestNumber,
+      });
+    }
+
+    // Optimisation 1: review files in parallel batches instead of sequentially
+    const REVIEW_CONCURRENCY = Number(process.env.REVIEW_CONCURRENCY ?? 3);
+
+    async function reviewFile(f: EnrichedFile): Promise<AIReviewComment[]> {
       const category = categorizeFile(f.filename);
 
+      // Optimisation 2: omit repoContext from per-file prompts — same content
+      // repeated N times is the biggest token waste. PR title/body gives enough
+      // context for the model to understand the change goal.
       const extractedContext =
         f.logicalBlocks && f.logicalBlocks.length > 0
           ? f.logicalBlocks
@@ -311,23 +329,23 @@ const worker = new Worker<JobData>(
           : "";
 
       try {
-        const comments = await reviewSingleFile({
+        return await reviewSingleFile({
           pr: { title: pr.data.title, body: pr.data.body },
-          file: {
-            filename: f.filename,
-            diffContent: f.patch,
-            extractedContext,
-          },
+          file: { filename: f.filename, diffContent: f.patch, extractedContext },
           category,
-          repoContext,
+          // repoContext intentionally omitted — see optimisation 2
         });
-        allComments.push(...comments);
       } catch (err) {
-        logStructured("worker.ai.file.error", {
-          file: f.filename,
-          error: String(err),
-        });
+        logStructured("worker.ai.file.error", { file: f.filename, error: String(err) });
+        return [];
       }
+    }
+
+    const allComments: AIReviewComment[] = [];
+    for (let i = 0; i < filesToReview.length; i += REVIEW_CONCURRENCY) {
+      const batch = filesToReview.slice(i, i + REVIEW_CONCURRENCY);
+      const batchResults = await Promise.all(batch.map(reviewFile));
+      allComments.push(...batchResults.flat());
     }
 
     const dedupedComments = deduplicateComments(allComments);

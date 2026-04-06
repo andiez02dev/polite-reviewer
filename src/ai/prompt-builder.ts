@@ -125,11 +125,14 @@ export function buildSingleFilePrompt(
       ? `## Repository context\n\n${repoParts.join("\n\n")}\n\n`
       : "";
 
+  // Optimisation 3: cap PR body to avoid wasting tokens on long templates/changelogs
+  const prBodyTrimmed = pr.body ? pr.body.slice(0, 500) + (pr.body.length > 500 ? "\n...(truncated)" : "") : "(no description)";
+
   const userPrompt = `## PR context
 
 Title: ${pr.title}
 Description:
-${pr.body ?? "(no description)"}
+${prBodyTrimmed}
 
 ${repoBlock}## Role-specific review instructions
 
